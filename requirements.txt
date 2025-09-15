@@ -1,0 +1,4 @@
+Flask==2.3.3
+requests==2.32.3
+Pillow==10.4.0
+flask-cors==4.0.1

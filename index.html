@@ -35,6 +35,17 @@
         .model-selector-container label { display: block; font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.5rem; }
         #model-selector { width: 100%; background-color: var(--bg-dark-tertiary); color: var(--text-primary); border: 1px solid var(--border-color); padding: 0.5rem; border-radius: 0.5rem; font-size: 0.9rem; -webkit-appearance: none; appearance: none; background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23a0a0c0' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e"); background-position: right 0.5rem center; background-repeat: no-repeat; background-size: 1.5em 1.5em; }
         #model-selector:disabled { background-color: var(--bg-dark-primary); color: var(--text-secondary); cursor: not-allowed; opacity: 0.7; }
+        .reasoning-toggle-container { margin-bottom: 1rem; }
+        .reasoning-toggle-container label:first-child { display: flex; justify-content: space-between; align-items: center; font-size: 0.875rem; color: var(--text-secondary); }
+        .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--bg-dark-tertiary); -webkit-transition: .4s; transition: .4s; border-radius: 24px; }
+        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: var(--text-primary); -webkit-transition: .4s; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: var(--accent-primary); }
+        input:focus + .slider { box-shadow: 0 0 1px var(--accent-primary); }
+        input:checked + .slider:before { -webkit-transform: translateX(20px); -ms-transform: translateX(20px); transform: translateX(20px); }
+        .reasoning-toggle-container.disabled { opacity: 0.7; pointer-events: none; }
+        .reasoning-toggle-container.disabled .slider { cursor: not-allowed; }
         .temperature-container { margin-bottom: 1rem; display: none; }
         .temperature-container label { display: flex; justify-content: space-between; align-items: center; font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.5rem; }
         #temperature-slider { width: 100%; -webkit-appearance: none; appearance: none; height: 5px; background: var(--bg-dark-tertiary); border-radius: 5px; outline: none; }
@@ -139,6 +150,16 @@
                 <option value="claude-sonnet-3.7">Claude Sonnet 3.7</option>
             </select>
         </div>
+
+        <div class="reasoning-toggle-container" id="reasoning-toggle-container">
+            <label for="reasoning-toggle">
+                <span>AI Reasoning</span>
+                <label class="switch">
+                    <input type="checkbox" id="reasoning-toggle" checked>
+                    <span class="slider round"></span>
+                </label>
+            </label>
+        </div>
         
         <div class="temperature-container" id="temperature-container">
             <label for="temperature-slider">
@@ -194,6 +215,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const stopBtn = document.getElementById('stop-btn');
     const statusIndicator = document.getElementById('status-indicator');
     const modelSelector = document.getElementById('model-selector');
+    const reasoningToggleContainer = document.getElementById('reasoning-toggle-container');
+    const reasoningToggle = document.getElementById('reasoning-toggle');
     const attachBtn = document.getElementById('attach-btn');
     const fileInput = document.getElementById('file-input');
     const filePreviewContainer = document.getElementById('file-preview-container');
@@ -207,7 +230,6 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     let codeEditor = null;
 
-    // No models support temperature configuration
     const configurableModels = [];
 
     function init() {
@@ -233,6 +255,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     Object.values(appState.chats).forEach(chat => {
                         if (!chat.model) chat.model = 'claude-sonnet-3.7';
                         if (chat.temperature === undefined) chat.temperature = 0.9;
+                        if (chat.isReasoningEnabled === undefined) chat.isReasoningEnabled = true;
                     });
                     appState.currentChatId = parsed.currentChatId;
                 }
@@ -529,7 +552,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (appState.isLoading) return;
         const newId = Date.now().toString();
         appState.currentChatId = newId;
-        appState.chats[newId] = { id: newId, title: 'New Chat', messages: [], createdAt: Date.now(), model: 'claude-sonnet-3.7', temperature: 0.9 };
+        appState.chats[newId] = { id: newId, title: 'New Chat', messages: [], createdAt: Date.now(), model: 'claude-sonnet-3.7', temperature: 0.9, isReasoningEnabled: true };
         clearFilePreview();
         switchToChat(newId);
     }
@@ -539,7 +562,7 @@ document.addEventListener('DOMContentLoaded', () => {
         appState.currentChatId = chatId;
         const chat = appState.chats[chatId];
         chatTitle.textContent = chat.title || 'Untitled Chat';
-        updateModelControls(chat);
+        updateChatControls(chat);
         renderSidebar();
         renderChatMessages();
         saveStateToLocalStorage();
@@ -549,9 +572,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function updateModelControls(chat) {
+    function updateChatControls(chat) {
+        const hasMessages = chat.messages.length > 0;
+        
         modelSelector.value = chat.model || 'claude-sonnet-3.7';
-        modelSelector.disabled = chat.messages.length > 0;
+        modelSelector.disabled = hasMessages;
+
+        reasoningToggle.checked = chat.isReasoningEnabled;
+        if (hasMessages) {
+            reasoningToggleContainer.classList.add('disabled');
+        } else {
+            reasoningToggleContainer.classList.remove('disabled');
+        }
+
         const showTempSlider = configurableModels.includes(chat.model);
         temperatureContainer.style.display = showTempSlider ? 'block' : 'none';
         if (showTempSlider) {
@@ -609,7 +642,13 @@ document.addEventListener('DOMContentLoaded', () => {
         abortController = new AbortController();
         const thinkingTagRegex = /<think>([\s\S]*?)<\/think>/gi;
         try {
-            const payload = { session: currentChat.id, model: currentChat.model, action: 'continue', temperature: currentChat.temperature };
+            const payload = { 
+                session: currentChat.id, 
+                model: currentChat.model, 
+                action: 'continue', 
+                temperature: currentChat.temperature,
+                isReasoningEnabled: currentChat.isReasoningEnabled 
+            };
             const res = await fetch("/chat", { method: "POST", signal: abortController.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
             if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
             const reader = res.body.getReader();
@@ -669,13 +708,21 @@ document.addEventListener('DOMContentLoaded', () => {
             chatTitle.textContent = currentChat.title;
             renderSidebar();
         }
-        updateModelControls(currentChat);
+        updateChatControls(currentChat);
         inputTextArea.value = '';
         autoResizeTextarea();
         const botMessageBubble = addMessageToUI({ role: 'bot', content: 'typing' });
         abortController = new AbortController();
         try {
-            const payload = { session: currentChat.id, text: messageText, fileInfo: appState.attachedFileInfo, model: currentChat.model, action: 'chat', temperature: currentChat.temperature };
+            const payload = { 
+                session: currentChat.id, 
+                text: messageText, 
+                fileInfo: appState.attachedFileInfo, 
+                model: currentChat.model, 
+                action: 'chat', 
+                temperature: currentChat.temperature,
+                isReasoningEnabled: currentChat.isReasoningEnabled
+            };
             clearFilePreview();
             const res = await fetch("/chat", { method: "POST", signal: abortController.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
             if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
@@ -805,7 +852,14 @@ document.addEventListener('DOMContentLoaded', () => {
         modelSelector.addEventListener('change', () => {
             if (appState.currentChatId && appState.chats[appState.currentChatId]) {
                 appState.chats[appState.currentChatId].model = modelSelector.value;
-                updateModelControls(appState.chats[appState.currentChatId]);
+                updateChatControls(appState.chats[appState.currentChatId]);
+                saveStateToLocalStorage();
+            }
+        });
+
+        reasoningToggle.addEventListener('change', () => {
+            if (appState.currentChatId && appState.chats[appState.currentChatId]) {
+                appState.chats[appState.currentChatId].isReasoningEnabled = reasoningToggle.checked;
                 saveStateToLocalStorage();
             }
         });

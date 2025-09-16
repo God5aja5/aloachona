@@ -40,11 +40,11 @@ def init_db():
             db.execute("DROP TABLE IF EXISTS chats")
             db.execute("""
             CREATE TABLE chats(
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               session_id TEXT,
-               role TEXT,
-               message TEXT,
-               ts DATETIME DEFAULT CURRENT_TIMESTAMP
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                role TEXT,
+                message TEXT,
+                ts DATETIME DEFAULT CURRENT_TIMESTAMP
             )""")
             db.commit()
 
@@ -102,14 +102,14 @@ claude_headers = {
 }
 claude_url = 'https://ai-sdk-reasoning.vercel.app/api/chat'
 
-def stream_claude_sonnet(chat_history):
+def stream_claude_sonnet(chat_history, is_reasoning_enabled):
     api_messages = [
         {"parts": [{"type": "text", "text": msg['content']}], "id": str(uuid.uuid4())[:12], "role": msg['role']}
         for msg in chat_history
     ]
     payload = {
         'selectedModelId': 'sonnet-3.7',
-        'isReasoningEnabled': True,
+        'isReasoningEnabled': is_reasoning_enabled,
         'id': str(uuid.uuid4())[:12],
         'messages': api_messages,
         'trigger': 'submit-user-message',
@@ -198,8 +198,6 @@ def execute_code():
             return jsonify({"error": "No code provided"}), 400
         if language != "python":
             return jsonify({"error": "Only Python execution is supported currently"}), 400
-        # Note: In a production environment, use a proper sandbox like Pyodide or a server-side isolated environment
-        # For simplicity, this is a placeholder for client-side execution integration
         return jsonify({"output": "Code execution is not fully implemented server-side. Use client-side Pyodide for now."})
     except Exception as e:
         return jsonify({"error": f"Execution error: {str(e)}"}), 500
@@ -211,6 +209,8 @@ def chat():
         sid = data["session"]
         model = data.get("model", "claude-sonnet-3.7")
         action = data.get("action", "chat")
+        is_reasoning_enabled = data.get("isReasoningEnabled", True)
+
         if action == "chat":
             text = data["text"]
             file_info = data.get("fileInfo")
@@ -233,7 +233,7 @@ def chat():
             buffer = ""
             try:
                 if model == 'claude-sonnet-3.7':
-                    for chunk_text in stream_claude_sonnet(chat_history):
+                    for chunk_text in stream_claude_sonnet(chat_history, is_reasoning_enabled):
                         buffer += chunk_text
                         yield chunk_text
                 else:

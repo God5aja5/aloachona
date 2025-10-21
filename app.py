@@ -54,17 +54,26 @@ def save_msg(sid, role, msg):
         db.execute("INSERT INTO chats(session_id, role, message) VALUES (?,?,?)", (sid, role, msg))
         db.commit()
 
-def update_last_bot_message(sid, new_content_chunk):
+def update_last_bot_message(sid, new_content_chunk, is_code_block_open=False):
     with db_lock:
         db = get_db()
         cursor = db.execute("SELECT id, message FROM chats WHERE session_id=? AND role='bot' ORDER BY ts DESC LIMIT 1", (sid,))
         last_bot_msg = cursor.fetchone()
+        updated_message = ""
         if last_bot_msg:
-            updated_message = last_bot_msg['message'] + new_content_chunk
+            existing_message = last_bot_msg['message']
+            if is_code_block_open:
+                # If code block is open, append directly without extra fences
+                updated_message = existing_message + new_content_chunk
+            else:
+                # Normal append for non-code or closed code blocks
+                updated_message = existing_message + new_content_chunk
             db.execute("UPDATE chats SET message=? WHERE id=?", (updated_message, last_bot_msg['id']))
-            db.commit()
         else:
-            save_msg(sid, "bot", new_content_chunk)
+            updated_message = new_content_chunk
+            save_msg(sid, "bot", updated_message)
+        db.commit()
+        return updated_message
 
 def load_msgs(sid):
     db = get_db()
@@ -81,7 +90,6 @@ def load_msgs(sid):
 # API Integration Section
 # ==============================================================================
 
-# --- API: Claude Sonnet 3.7 ---
 claude_session = requests.Session()
 claude_headers = {
     'authority': 'ai-sdk-reasoning.vercel.app',
@@ -102,7 +110,7 @@ claude_headers = {
 }
 claude_url = 'https://ai-sdk-reasoning.vercel.app/api/chat'
 
-def stream_claude_sonnet(chat_history, is_reasoning_enabled):
+def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=False, last_partial_line=None):
     api_messages = [
         {"parts": [{"type": "text", "text": msg['content']}], "id": str(uuid.uuid4())[:12], "role": msg['role']}
         for msg in chat_history
@@ -117,6 +125,9 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled):
     try:
         with claude_session.post(claude_url, headers=claude_headers, json=payload, stream=True, timeout=90) as r:
             r.raise_for_status()
+            code_block_open = False
+            code_fence_count = 0
+            buffer = ""
             for line in r.iter_lines():
                 if line:
                     decoded = line.decode('utf-8')
@@ -129,11 +140,22 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled):
                         if data_json.get("type") == "text-delta":
                             delta = data_json.get("delta", "")
                             if delta:
-                                yield delta
+                                # Track code block state
+                                code_fence_count += delta.count('```')
+                                code_block_open = code_fence_count % 2 == 1
+                                if is_continuation and last_partial_line and buffer == "":
+                                    # Trim overlapping content and avoid extra whitespace
+                                    delta = delta.lstrip()
+                                    if delta.startswith(last_partial_line):
+                                        delta = delta[len(last_partial_line):]
+                                    elif last_partial_line.endswith(delta[0]):
+                                        delta = delta[1:]  # Skip the first character if it matches the last one
+                                buffer += delta
+                                yield delta, code_block_open
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         continue
     except Exception as e:
-        yield f"🚨 Claude API Error: {str(e)}"
+        yield f"🚨 Claude API Error: {str(e)}", False
 
 # ==============================================================================
 # Flask Routes
@@ -219,11 +241,31 @@ def chat():
             chat_history = load_msgs(sid)
         elif action == "continue":
             chat_history = load_msgs(sid)
-            continue_prompt = {
-                'role': 'user',
-                'content': "Please continue generating the response precisely from where you left off. If it is code, ensure it's a valid continuation and start with a comment indicating it's a continuation (e.g., '# Part 2', '// Continued...'). Do not add any introductory phrases or repeat previous content."
-            }
-            chat_history.append(continue_prompt)
+            if chat_history and chat_history[-1]['role'] == 'assistant':
+                last_content = chat_history[-1]['content']
+                last_lines = '\n'.join(last_content.split('\n')[-3:])
+                last_line = last_content.split('\n')[-1].rstrip()
+                open_code_block = last_content.count('```') % 2 == 1
+                if open_code_block:
+                    continue_content = (
+                        f"Please continue the code precisely from the last character of the incomplete line: '{last_line}'.\n"
+                        f"Start your response with the exact characters needed to complete the line, without repeating any part of '{last_line}', "
+                        f"and without adding any extra spaces, newlines, ``` fences, or introductory phrases. For example, if the last line was 'parent_i', "
+                        f"start with 'd' to complete 'parent_id' seamlessly."
+                    )
+                else:
+                    continue_content = (
+                        f"Please continue the response precisely from where you left off. "
+                        f"The last part was:\n{last_lines}\n"
+                        f"Start with the next sentence or content without repetition, extra spaces, newlines, or introductory phrases."
+                    )
+                continue_prompt = {
+                    'role': 'user',
+                    'content': continue_content
+                }
+                chat_history.append(continue_prompt)
+            else:
+                return Response("No previous bot message to continue.", status=400)
             text = "continue"
             file_info = None
         else:
@@ -231,10 +273,13 @@ def chat():
 
         def gen():
             buffer = ""
+            code_block_open = False
             try:
                 if model == 'claude-sonnet-3.7':
-                    for chunk_text in stream_claude_sonnet(chat_history, is_reasoning_enabled):
+                    last_line = chat_history[-1]['content'].split('\n')[-1].rstrip() if action == "continue" and chat_history else None
+                    for chunk_text, is_code_block_open in stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=(action == "continue"), last_partial_line=last_line):
                         buffer += chunk_text
+                        code_block_open = is_code_block_open
                         yield chunk_text
                 else:
                     error_msg = f"🚫 The selected model '{model}' is not supported."
@@ -251,7 +296,7 @@ def chat():
             if buffer:
                 with app.app_context():
                     if action == "continue":
-                        update_last_bot_message(sid, buffer)
+                        update_last_bot_message(sid, buffer, code_block_open)
                     else:
                         save_msg(sid, "bot", buffer)
 

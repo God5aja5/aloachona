@@ -662,9 +662,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const { value, done } = await reader.read();
                 if (done) break;
                 const chunk = decoder.decode(value, { stream: true });
+                newContent += chunk;
                 const chunkVisibleText = chunk.replace(thinkingTagRegex, '');
                 newVisibleContent += chunkVisibleText;
-                newContent += chunk;
                 botMessageBubble.innerHTML = marked.parse(existingContent.replace(thinkingTagRegex, '') + "\n" + newVisibleContent + " ▋", { gfm: true, breaks: true });
                 renderMarkdown(botMessageBubble);
                 scrollToBottom();

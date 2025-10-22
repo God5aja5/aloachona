@@ -156,14 +156,15 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=Fal
 
 # GPT-5 API Setup
 gpt5_session = requests.Session()
-API_KEY = "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"
 gpt5_url = "https://api.openai.com/v1/chat/completions"
-gpt5_headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {API_KEY}"
-}
 
-def call_gpt5(chat_history, is_reasoning_enabled, is_continuation=False):
+def call_gpt5(chat_history, is_reasoning_enabled, is_continuation=False, api_key=None):
+    if not api_key:
+        return "🚨 GPT-5 API Error: No API key provided.", False
+    gpt5_headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
     api_messages = [{"role": "system", "content": "You are a helpful and smart AI assistant."}]
     api_messages.extend([{"role": msg['role'], "content": msg['content']} for msg in chat_history])
     payload = {
@@ -255,6 +256,7 @@ def chat():
         model = data.get("model", "claude-sonnet-3.7")
         action = data.get("action", "chat")
         is_reasoning_enabled = data.get("isReasoningEnabled", True)
+        gpt5_api_key = data.get("gpt5ApiKey")  # Get API key from request for GPT-5
 
         if action == "chat":
             text = data["text"]
@@ -305,7 +307,7 @@ def chat():
                         code_block_open = is_code_block_open
                         yield chunk_text
                 elif model == 'gpt-5':
-                    response_text, is_code_block_open = call_gpt5(chat_history, is_reasoning_enabled, is_continuation=(action == "continue"))
+                    response_text, is_code_block_open = call_gpt5(chat_history, is_reasoning_enabled, is_continuation=(action == "continue"), api_key=gpt5_api_key)
                     buffer = response_text
                     code_block_open = is_code_block_open
                     yield response_text

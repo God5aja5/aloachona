@@ -63,10 +63,8 @@ def update_last_bot_message(sid, new_content_chunk, is_code_block_open=False):
         if last_bot_msg:
             existing_message = last_bot_msg['message']
             if is_code_block_open:
-                # If code block is open, append directly without extra fences
                 updated_message = existing_message + new_content_chunk
             else:
-                # Normal append for non-code or closed code blocks
                 updated_message = existing_message + new_content_chunk
             db.execute("UPDATE chats SET message=? WHERE id=?", (updated_message, last_bot_msg['id']))
         else:
@@ -90,6 +88,7 @@ def load_msgs(sid):
 # API Integration Section
 # ==============================================================================
 
+# Claude API Setup
 claude_session = requests.Session()
 claude_headers = {
     'authority': 'ai-sdk-reasoning.vercel.app',
@@ -123,7 +122,7 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=Fal
         'trigger': 'submit-user-message',
     }
     try:
-        with claude_session.post(claude_url, headers=claude_headers, json=payload, stream=True, timeout=90) as r:
+        with claude_session.post(claude_url, headers=claude_headers, json=payload, stream=True) as r:
             r.raise_for_status()
             code_block_open = False
             code_fence_count = 0
@@ -140,22 +139,46 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=Fal
                         if data_json.get("type") == "text-delta":
                             delta = data_json.get("delta", "")
                             if delta:
-                                # Track code block state
                                 code_fence_count += delta.count('```')
                                 code_block_open = code_fence_count % 2 == 1
                                 if is_continuation and last_partial_line and buffer == "":
-                                    # Trim overlapping content and avoid extra whitespace
                                     delta = delta.lstrip()
                                     if delta.startswith(last_partial_line):
                                         delta = delta[len(last_partial_line):]
                                     elif last_partial_line.endswith(delta[0]):
-                                        delta = delta[1:]  # Skip the first character if it matches the last one
+                                        delta = delta[1:]
                                 buffer += delta
                                 yield delta, code_block_open
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         continue
     except Exception as e:
         yield f"🚨 Claude API Error: {str(e)}", False
+
+# GPT-5 API Setup
+gpt5_session = requests.Session()
+API_KEY = "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"
+gpt5_url = "https://api.openai.com/v1/chat/completions"
+gpt5_headers = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {API_KEY}"
+}
+
+def call_gpt5(chat_history, is_reasoning_enabled, is_continuation=False):
+    api_messages = [{"role": "system", "content": "You are a helpful and smart AI assistant."}]
+    api_messages.extend([{"role": msg['role'], "content": msg['content']} for msg in chat_history])
+    payload = {
+        "model": "gpt-5",
+        "messages": api_messages,
+        "stream": False
+    }
+    try:
+        response = gpt5_session.post(gpt5_url, headers=gpt5_headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        reply = data["choices"][0]["message"]["content"]
+        return reply, False  # False for code_block_open as it's non-streaming
+    except Exception as e:
+        return f"🚨 GPT-5 API Error: {str(e)}", False
 
 # ==============================================================================
 # Flask Routes
@@ -281,6 +304,11 @@ def chat():
                         buffer += chunk_text
                         code_block_open = is_code_block_open
                         yield chunk_text
+                elif model == 'gpt-5':
+                    response_text, is_code_block_open = call_gpt5(chat_history, is_reasoning_enabled, is_continuation=(action == "continue"))
+                    buffer = response_text
+                    code_block_open = is_code_block_open
+                    yield response_text
                 else:
                     error_msg = f"🚫 The selected model '{model}' is not supported."
                     yield error_msg

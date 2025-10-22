@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
-    <title>🤖 Mini GPT Pro 2.0 (Claude Sonnet 3.7)</title>
+    <title>🤖 Mini GPT Pro 2.0</title>
     
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
@@ -31,6 +31,7 @@
         .new-chat-btn-container { margin-bottom: 1rem; }
         .new-chat-btn { background-color: var(--accent-primary); color: var(--text-white); border: none; padding: 0.75rem 1.25rem; border-radius: 0.5rem; font-size: 1rem; cursor: pointer; transition: background-color 0.2s ease; display: flex; align-items: center; justify-content: center; gap: 0.5rem; width: 100%; }
         .new-chat-btn:hover { background-color: var(--accent-primary-hover); }
+        .new-chat-btn.disabled { background-color: var(--bg-dark-tertiary); cursor: not-allowed; }
         .model-selector-container { margin-bottom: 1rem; }
         .model-selector-container label { display: block; font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.5rem; }
         #model-selector { width: 100%; background-color: var(--bg-dark-tertiary); color: var(--text-primary); border: 1px solid var(--border-color); padding: 0.5rem; border-radius: 0.5rem; font-size: 0.9rem; -webkit-appearance: none; appearance: none; background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23a0a0c0' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e"); background-position: right 0.5rem center; background-repeat: no-repeat; background-size: 1.5em 1.5em; }
@@ -57,6 +58,7 @@
         .chat-list-item .chat-title-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-grow: 1; }
         .chat-list-item:hover { background-color: var(--bg-light-hover); }
         .chat-list-item.active { background-color: var(--bg-dark-tertiary); }
+        .chat-list-item.disabled { opacity: 0.7; pointer-events: none; }
         .delete-chat-btn { background: none; border: none; color: var(--text-secondary); font-size: 1rem; cursor: pointer; transition: color 0.2s ease; flex-shrink: 0; }
         .delete-chat-btn:hover { color: var(--accent-danger); }
         .chat-view { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
@@ -148,6 +150,7 @@
             <label for="model-selector">Select AI Model</label>
             <select id="model-selector">
                 <option value="claude-sonnet-3.7">Claude Sonnet 3.7</option>
+                <option value="gpt-5">GPT-5</option>
             </select>
         </div>
 
@@ -275,12 +278,24 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function updateSidebarState() {
+        const chatItems = chatList.querySelectorAll('.chat-list-item');
+        chatItems.forEach(item => {
+            if (appState.isLoading) {
+                item.classList.add('disabled');
+            } else {
+                item.classList.remove('disabled');
+            }
+        });
+        newChatBtn.classList.toggle('disabled', appState.isLoading);
+    }
+
     function renderSidebar() {
         chatList.innerHTML = '';
         const sortedChats = Object.values(appState.chats).sort((a, b) => b.createdAt - a.createdAt);
         sortedChats.forEach(chat => {
             const li = document.createElement('li');
-            li.className = `chat-list-item ${chat.id === appState.currentChatId ? 'active' : ''}`;
+            li.className = `chat-list-item ${chat.id === appState.currentChatId ? 'active' : ''} ${appState.isLoading ? 'disabled' : ''}`;
             li.dataset.chatId = chat.id;
             const titleSpan = document.createElement('span');
             titleSpan.className = 'chat-title-text';
@@ -292,6 +307,7 @@ document.addEventListener('DOMContentLoaded', () => {
             deleteBtn.title = 'Delete Chat';
             deleteBtn.onclick = (e) => {
                 e.stopPropagation();
+                if (appState.isLoading) return;
                 if (confirm(`Are you sure you want to delete "${chat.title || 'this chat'}"?`)) {
                     deleteChat(chat.id);
                 }
@@ -594,6 +610,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function deleteChat(chatId) {
+        if (appState.isLoading) return;
         delete appState.chats[chatId];
         saveStateToLocalStorage();
         if (appState.currentChatId === chatId) {
@@ -768,6 +785,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function setLoadingState(isLoading) {
         appState.isLoading = isLoading;
+        updateSidebarState();
         if (isLoading) {
             sendBtn.classList.add('hidden');
             stopBtn.classList.remove('hidden');

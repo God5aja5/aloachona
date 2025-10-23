@@ -413,7 +413,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             messageContent.dataset.rawContent = content || '';
             const renderedMarkdown = marked.parse(visibleText || '', { gfm: true, breaks: true });
-            messageContent.innerHTML += renderedMarkdown;
+            messageContent.innerHTML = renderedMarkdown;
         }
         messageBody.appendChild(messageContent);
         if (role !== 'bot' || content !== 'typing') {
@@ -616,7 +616,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (appState.isLoading) return;
         const newId = Date.now().toString();
         appState.currentChatId = newId;
-        appState.chats[newId] = { id: newId, title: 'New Chat', messages: [], createdAt: Date.now(), model: 'claude-sonnet-3.7', isReasoningEnabled: true };
+        appState.chats[newId] = { id: newId, title: 'New Chat', messages: [], createdAt: Date.now(), model: modelSelector.value, isReasoningEnabled: reasoningToggle.checked };
         clearFilePreview();
         switchToChat(newId);
     }
@@ -707,25 +707,42 @@ document.addEventListener('DOMContentLoaded', () => {
                 isReasoningEnabled: currentChat.isReasoningEnabled,
                 gpt5ApiKey: appState.gpt5ApiKey
             };
-            const res = await fetch("/chat", { method: "POST", signal: abortController.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
+            const res = await fetch("/chat", { 
+                method: "POST", 
+                signal: abortController.signal, 
+                headers: {"Content-Type": "application/json"}, 
+                body: JSON.stringify(payload) 
+            });
             if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let existingContent = botMessageBubble.dataset.rawContent || '';
+            const existingContent = botMessageBubble.dataset.rawContent || '';
             let newContent = "";
             let newVisibleContent = "";
             botMessageBubble.innerHTML = marked.parse(existingContent.replace(thinkingTagRegex, '') + "\n", { gfm: true, breaks: true });
             renderMarkdown(botMessageBubble);
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value, { stream: true });
-                newContent += chunk;
-                const chunkVisibleText = chunk.replace(thinkingTagRegex, '');
-                newVisibleContent += chunkVisibleText;
-                botMessageBubble.innerHTML = marked.parse(existingContent.replace(thinkingTagRegex, '') + "\n" + newVisibleContent + " ▋", { gfm: true, breaks: true });
+            if (currentChat.model === 'gpt-5') {
+                const data = await res.json();
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                newContent = data.content;
+                newVisibleContent = newContent.replace(thinkingTagRegex, '');
+                botMessageBubble.innerHTML = marked.parse(existingContent.replace(thinkingTagRegex, '') + "\n" + newVisibleContent, { gfm: true, breaks: true });
                 renderMarkdown(botMessageBubble);
                 scrollToBottom();
+            } else {
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    const chunk = decoder.decode(value, { stream: true });
+                    newContent += chunk;
+                    const chunkVisibleText = chunk.replace(thinkingTagRegex, '');
+                    newVisibleContent += chunkVisibleText;
+                    botMessageBubble.innerHTML = marked.parse(existingContent.replace(thinkingTagRegex, '') + "\n" + newVisibleContent + " ▋", { gfm: true, breaks: true });
+                    renderMarkdown(botMessageBubble);
+                    scrollToBottom();
+                }
             }
             const finalFullContent = existingContent + newContent;
             const lastMessage = currentChat.messages[currentChat.messages.length - 1];
@@ -787,11 +804,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 gpt5ApiKey: appState.gpt5ApiKey
             };
             clearFilePreview();
-            const res = await fetch("/chat", { method: "POST", signal: abortController.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
+            const res = await fetch("/chat", { 
+                method: "POST", 
+                signal: abortController.signal, 
+                headers: {"Content-Type": "application/json"}, 
+                body: JSON.stringify(payload) 
+            });
             if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
             if (currentChat.model === 'gpt-5') {
                 const data = await res.json();
-                const botResponse = data;
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                const botResponse = data.content;
                 botMessageBubble.dataset.rawContent = botResponse;
                 botMessageBubble.innerHTML = marked.parse(botResponse, { gfm: true, breaks: true });
                 renderMarkdown(botMessageBubble);
@@ -885,6 +910,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData();
         formData.append('file', file);
         try {
+            setLoadingState(true);
             const response = await fetch('/upload_file', {
                 method: 'POST',
                 body: formData
@@ -895,7 +921,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             appState.attachedFileInfo = fileInfo;
-            filePreviewContainer.innerHTML = '';
             const previewDiv = document.createElement('div');
             previewDiv.className = 'file-preview';
             if (fileInfo.type === 'image') {
@@ -910,48 +935,49 @@ document.addEventListener('DOMContentLoaded', () => {
             const removeBtn = document.createElement('button');
             removeBtn.className = 'remove-file-btn';
             removeBtn.textContent = '×';
-            removeBtn.onclick = clearFilePreview;
+            removeBtn.onclick = () => clearFilePreview();
             previewDiv.appendChild(removeBtn);
+            filePreviewContainer.innerHTML = '';
             filePreviewContainer.appendChild(previewDiv);
             fileInput.value = '';
         } catch (error) {
             alert(`Error uploading file: ${error.message}`);
+        } finally {
+            setLoadingState(false);
         }
     }
 
     function setupEventListeners() {
-        menuBtn.addEventListener('click', () => sidebar.classList.add('open'));
-        closeSidebarBtn.addEventListener('click', () => sidebar.classList.remove('open'));
-        newChatBtn.addEventListener('click', startNewChat);
-        apiKeyBtn.addEventListener('click', showApiKeyModal);
-        modelSelector.addEventListener('change', () => {
+        menuBtn.onclick = () => sidebar.classList.toggle('open');
+        closeSidebarBtn.onclick = () => sidebar.classList.remove('open');
+        newChatBtn.onclick = startNewChat;
+        apiKeyBtn.onclick = showApiKeyModal;
+        modelSelector.onchange = () => {
             const chat = appState.chats[appState.currentChatId];
+            if (!chat || chat.messages.length > 0) return;
             chat.model = modelSelector.value;
-            updateChatControls(chat);
             updateReasoningToggleVisibility();
             saveStateToLocalStorage();
-        });
-        reasoningToggle.addEventListener('change', () => {
+        };
+        reasoningToggle.onchange = () => {
             const chat = appState.chats[appState.currentChatId];
+            if (!chat || chat.messages.length > 0) return;
             chat.isReasoningEnabled = reasoningToggle.checked;
             saveStateToLocalStorage();
-        });
-        sendBtn.addEventListener('click', sendMessage);
-        stopBtn.addEventListener('click', () => {
-            if (abortController) {
-                abortController.abort();
-                abortController = null;
-            }
-        });
-        inputTextArea.addEventListener('input', autoResizeTextarea);
-        inputTextArea.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !appState.isLoading) {
+        };
+        inputTextArea.oninput = autoResizeTextarea;
+        inputTextArea.onkeydown = (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
             }
-        });
-        attachBtn.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', handleFileUpload);
+        };
+        sendBtn.onclick = sendMessage;
+        stopBtn.onclick = () => {
+            if (abortController) abortController.abort();
+        };
+        attachBtn.onclick = () => fileInput.click();
+        fileInput.onchange = handleFileUpload;
     }
 
     init();

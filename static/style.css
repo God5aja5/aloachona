@@ -83,8 +83,8 @@ input:checked + .slider:before { -webkit-transform: translateX(20px); -ms-transf
 .input-wrapper { display: flex; align-items: flex-end; background-color: var(--bg-dark-tertiary); border-radius: var(--border-radius-large); padding: 0.5rem; }
 #input-textarea { flex-grow: 1; background-color: transparent; color: var(--text-primary); border: none; padding: 0.75rem 1rem; resize: none; font-family: var(--font-main); font-size: 1rem; max-height: 150px; }
 #input-textarea:focus { outline: none; }
-.send-btn, .stop-btn, .attach-btn { background-color: var(--accent-primary); color: var(--text-white); border: none; padding: 0.5rem; width: 44px; height: 44px; border-radius: 50%; font-size: 1rem; cursor: pointer; transition: background-color 0.2s ease; margin-left: 0.5rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.attach-btn { background-color: var(--accent-secondary); } .attach-btn:hover { background-color: var(--accent-secondary-hover); }
+.send-btn, .stop-btn, .attach-btn, .ocr-btn { background-color: var(--accent-primary); color: var(--text-white); border: none; padding: 0.5rem; width: 44px; height: 44px; border-radius: 50%; font-size: 1rem; cursor: pointer; transition: background-color 0.2s ease; margin-left: 0.5rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.attach-btn, .ocr-btn { background-color: var(--accent-secondary); } .attach-btn:hover, .ocr-btn:hover { background-color: var(--accent-secondary-hover); }
 .send-btn svg, .stop-btn svg, .attach-btn svg { width: 24px; height: 24px; }
 .send-btn:hover { background-color: var(--accent-primary-hover); }
 .stop-btn { background-color: var(--accent-danger); } .stop-btn:hover { background-color: var(--accent-danger-hover); }

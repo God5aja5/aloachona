@@ -10,6 +10,7 @@ from flask import Flask, Response, stream_with_context, request, jsonify, g, sen
 import requests
 from PIL import Image
 import io
+from concurrent.futures import ThreadPoolExecutor
 
 # ==============================================================================
 # Database Setup
@@ -158,6 +159,29 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=Fal
         yield f"🚨 Claude API Error: {str(e)}", False
 
 # ==============================================================================
+# OCR API Integration
+# ==============================================================================
+OCR_API_KEY = "K87302967488957"
+OCR_API_URL = "https://api.ocr.space/parse/image"
+
+def ocr_space_file(file_storage):
+    """
+    OCRs a single file using the OCR.space API.
+    :param file_storage: A FileStorage object.
+    :return: The parsed text from the image.
+    """
+    payload = {'apikey': OCR_API_KEY}
+    with file_storage.stream as f:
+        r = requests.post(OCR_API_URL,
+                          files={file_storage.filename: f},
+                          data=payload,
+                          )
+    result = r.json()
+    if result['IsErroredOnProcessing']:
+        return f"Error processing {file_storage.filename}: {result['ErrorMessage']}"
+    return result['ParsedResults'][0]['ParsedText']
+
+# ==============================================================================
 # Flask Routes
 # ==============================================================================
 
@@ -168,6 +192,19 @@ def index():
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
+
+@app.route("/ocr_upload", methods=["POST"])
+def ocr_upload():
+    if 'files' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({"error": "No selected file"}), 400
+
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(ocr_space_file, files))
+
+    return jsonify({"text": "\n".join(results)})
 
 @app.route("/upload_file", methods=["POST"])
 def upload_file():

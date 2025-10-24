@@ -110,7 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
         currentChatId: null,
         chats: {},
         isLoading: false,
-        attachedFiles: [],
+        attachedFile: null,
     };
     let codeEditor = null;
 
@@ -196,7 +196,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function addMessageToUI(msg) {
-        const { role, content, file } = msg;
+        const { role, content, image_data } = msg;
         const wrapper = document.createElement('div');
         wrapper.className = 'message-wrapper';
         wrapper.dataset.role = role;
@@ -209,20 +209,12 @@ document.addEventListener('DOMContentLoaded', () => {
         messageBody.className = 'message-body';
         const messageContent = document.createElement('div');
         messageContent.className = 'message-content';
-        if (role === 'user' && file) {
-            if (file.type === 'image') {
-                const img = document.createElement('img');
-                img.src = file.base64;
-                img.className = 'user-message-image';
-                messageContent.appendChild(img);
-            } else if (file.type === 'code') {
-                const codePre = document.createElement('pre');
-                const codeBlock = document.createElement('code');
-                codeBlock.className = `language-${file.name.split('.').pop()}`;
-                codeBlock.textContent = file.content;
-                codePre.appendChild(codeBlock);
-                messageContent.appendChild(codePre);
-            }
+
+        if (image_data) {
+            const img = document.createElement('img');
+            img.src = image_data;
+            img.className = 'user-message-image';
+            messageContent.appendChild(img);
         }
         const thinkingTagRegex = /<think>([\s\S]*?)<\/think>/gi;
         const visibleText = (content || '').replace(thinkingTagRegex, '').trim();
@@ -572,44 +564,89 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function readFileAsDataURL(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    }
+
     async function sendMessage() {
         const messageText = inputTextArea.value.trim();
-        if (!messageText || appState.isLoading) return;
+        const hasContent = messageText || appState.attachedFile;
+        if (!hasContent || appState.isLoading) return;
+
         setLoadingState(true);
         const currentChat = appState.chats[appState.currentChatId];
-        const lastMessage = currentChat.messages[currentChat.messages.length - 1];
-        const isRegenerating = lastMessage && lastMessage.role === 'user' && lastMessage.content.includes(messageText);
-        if (!isRegenerating) {
-            let userMessage = { role: 'user', content: messageText, file: appState.attachedFileInfo };
-            if (appState.attachedFileInfo) {
-                userMessage.content = `[File: ${appState.attachedFileInfo.name}]\n${messageText}`;
+
+        let imageData = null;
+        if (appState.attachedFile) {
+            try {
+                imageData = await readFileAsDataURL(appState.attachedFile);
+            } catch (error) {
+                console.error("Error reading file:", error);
+                alert("There was an error reading the attached file.");
+                setLoadingState(false);
+                return;
             }
-            currentChat.messages.push(userMessage);
         }
+
+        const userMessage = { role: 'user', content: messageText, image_data: imageData };
+        currentChat.messages.push(userMessage);
         renderChatMessages();
-        if (currentChat.messages.length <= (isRegenerating ? 1 : 1) && currentChat.title === 'New Chat') {
-            currentChat.title = messageText.substring(0, 40) + (messageText.length > 40 ? '...' : '');
+
+        if (currentChat.messages.length === 1 && currentChat.title === 'New Chat') {
+            currentChat.title = messageText.substring(0, 40) || 'Image Message';
             chatTitle.textContent = currentChat.title;
             renderSidebar();
         }
+
         updateChatControls(currentChat);
         inputTextArea.value = '';
         autoResizeTextarea();
         const botMessageBubble = addMessageToUI({ role: 'bot', content: 'typing' });
         abortController = new AbortController();
+
         try {
-            const payload = { 
-                session: currentChat.id, 
-                text: messageText, 
-                fileInfo: appState.attachedFileInfo, 
-                model: currentChat.model, 
-                action: 'chat', 
-                temperature: currentChat.temperature,
-                isReasoningEnabled: currentChat.isReasoningEnabled
-            };
+            let res;
+            if (appState.attachedFile) {
+                const formData = new FormData();
+                formData.append('session', currentChat.id);
+                formData.append('text', messageText);
+                formData.append('model', currentChat.model);
+                formData.append('action', 'chat');
+                formData.append('temperature', currentChat.temperature);
+                formData.append('isReasoningEnabled', currentChat.isReasoningEnabled);
+                formData.append('file', appState.attachedFile);
+
+                res = await fetch("/chat", {
+                    method: "POST",
+                    signal: abortController.signal,
+                    body: formData
+                });
+            } else {
+                const payload = {
+                    session: currentChat.id,
+                    text: messageText,
+                    model: currentChat.model,
+                    action: 'chat',
+                    temperature: currentChat.temperature,
+                    isReasoningEnabled: currentChat.isReasoningEnabled
+                };
+                 res = await fetch("/chat", {
+                    method: "POST",
+                    signal: abortController.signal,
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+            }
+
             clearFilePreview();
-            const res = await fetch("/chat", { method: "POST", signal: abortController.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
+
             if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
+
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             let botResponse = "";
@@ -681,53 +718,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function clearFilePreview() {
         filePreviewContainer.innerHTML = '';
-        appState.attachedFiles = [];
-        ocrBtn.style.display = 'none';
+        appState.attachedFile = null;
+        fileInput.value = '';
     }
 
-    async function handleFileUpload(files) {
-        if (files.length > 5) {
-            alert('You can only upload up to 5 images at a time.');
+    function handleFileUpload(file) {
+        if (!file.type.startsWith('image/')) {
+            alert('Please upload an image file.');
             return;
         }
-
-        for (const file of files) {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const base64 = e.target.result;
-                const fileInfo = {
-                    name: file.name,
-                    type: file.type,
-                    base64: base64,
-                };
-                appState.attachedFiles.push(fileInfo);
-                renderFilePreview();
-            };
-            reader.readAsDataURL(file);
-        }
+        appState.attachedFile = file;
+        renderFilePreview();
     }
 
     function renderFilePreview() {
         filePreviewContainer.innerHTML = '';
-        appState.attachedFiles.forEach((file, index) => {
+        if (appState.attachedFile) {
             const previewDiv = document.createElement('div');
             previewDiv.className = 'file-preview';
-            if (file.type.startsWith('image/')) {
-                previewDiv.innerHTML = `<img src="${file.base64}" alt="Uploaded image"><button class="remove-file-btn" title="Remove file">×</button>`;
-            } else {
-                previewDiv.innerHTML = `<span>${file.name}</span><button class="remove-file-btn" title="Remove file">×</button>`;
-            }
+            const url = URL.createObjectURL(appState.attachedFile);
+            previewDiv.innerHTML = `<img src="${url}" alt="Uploaded image"><button class="remove-file-btn" title="Remove file">×</button>`;
             previewDiv.querySelector('.remove-file-btn').onclick = () => {
-                appState.attachedFiles.splice(index, 1);
-                renderFilePreview();
+                clearFilePreview();
             };
             filePreviewContainer.appendChild(previewDiv);
-        });
-
-        if (appState.attachedFiles.length > 0) {
-            ocrBtn.style.display = 'flex';
-        } else {
-            ocrBtn.style.display = 'none';
         }
     }
 
@@ -796,35 +810,9 @@ document.addEventListener('DOMContentLoaded', () => {
             fileInput.click();
         });
 
-        ocrBtn.addEventListener('click', async () => {
-            if (appState.attachedFiles.length === 0) return;
-
-            const formData = new FormData();
-            appState.attachedFiles.forEach(file => {
-                const blob = new Blob([file.base64], { type: file.type });
-                formData.append('files', blob, file.name);
-            });
-
-            try {
-                const response = await fetch('/ocr_upload', {
-                    method: 'POST',
-                    body: formData,
-                });
-                const data = await response.json();
-                if (data.error) {
-                    alert(data.error);
-                } else {
-                    inputTextArea.value += data.text;
-                    clearFilePreview();
-                }
-            } catch (error) {
-                alert('Failed to process images: ' + error.message);
-            }
-        });
-
         fileInput.addEventListener('change', (e) => {
-            if (e.target.files) {
-                handleFileUpload(Array.from(e.target.files));
+            if (e.target.files && e.target.files.length > 0) {
+                handleFileUpload(e.target.files[0]);
             }
         });
     }

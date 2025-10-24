@@ -10,7 +10,6 @@ from flask import Flask, Response, stream_with_context, request, jsonify, g, sen
 import requests
 from PIL import Image
 import io
-from concurrent.futures import ThreadPoolExecutor
 
 # ==============================================================================
 # Database Setup
@@ -45,14 +44,16 @@ def init_db():
                 session_id TEXT,
                 role TEXT,
                 message TEXT,
+                image_data TEXT,
+                media_type TEXT,
                 ts DATETIME DEFAULT CURRENT_TIMESTAMP
             )""")
             db.commit()
 
-def save_msg(sid, role, msg):
+def save_msg(sid, role, msg, image_data=None, media_type=None):
     with db_lock:
         db = get_db()
-        db.execute("INSERT INTO chats(session_id, role, message) VALUES (?,?,?)", (sid, role, msg))
+        db.execute("INSERT INTO chats(session_id, role, message, image_data, media_type) VALUES (?,?,?,?,?)", (sid, role, msg, image_data, media_type))
         db.commit()
 
 def update_last_bot_message(sid, new_content_chunk, is_code_block_open=False):
@@ -78,13 +79,32 @@ def update_last_bot_message(sid, new_content_chunk, is_code_block_open=False):
 
 def load_msgs(sid):
     db = get_db()
-    cursor = db.execute("SELECT role, message FROM chats WHERE session_id=? ORDER BY ts ASC", (sid,))
+    cursor = db.execute("SELECT role, message, image_data, media_type FROM chats WHERE session_id=? ORDER BY ts ASC", (sid,))
     messages = []
     for row in cursor.fetchall():
         role = "assistant" if row['role'] == 'bot' else row['role']
         clean_message = re.sub(r'<think>[\s\S]*?</think>', '', row['message'], flags=re.IGNORECASE).strip()
+
+        content = []
         if clean_message:
-            messages.append({'role': role, 'content': clean_message})
+            content.append({"type": "text", "text": clean_message})
+
+        if row['image_data'] and row['media_type']:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": row['media_type'],
+                    "data": row['image_data']
+                }
+            })
+
+        if content:
+            if role == 'user' and any(c.get("type") == "image" for c in content):
+                 messages.append({'role': role, 'content': content})
+            else:
+                 messages.append({'role': role, 'content': clean_message})
+
     return messages
 
 # ==============================================================================
@@ -112,10 +132,19 @@ claude_headers = {
 claude_url = 'https://ai-sdk-reasoning.vercel.app/api/chat'
 
 def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=False, last_partial_line=None):
-    api_messages = [
-        {"parts": [{"type": "text", "text": msg['content']}], "id": str(uuid.uuid4())[:12], "role": msg['role']}
-        for msg in chat_history
-    ]
+    api_messages = []
+    for msg in chat_history:
+        if isinstance(msg['content'], list): # Handle multipart messages (text + image)
+            parts = msg['content']
+        else: # Handle text-only messages
+            parts = [{"type": "text", "text": msg['content']}]
+
+        api_messages.append({
+            "parts": parts,
+            "id": str(uuid.uuid4())[:12],
+            "role": msg['role']
+        })
+
     payload = {
         'selectedModelId': 'sonnet-3.7',
         'isReasoningEnabled': is_reasoning_enabled,
@@ -159,29 +188,6 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=Fal
         yield f"🚨 Claude API Error: {str(e)}", False
 
 # ==============================================================================
-# OCR API Integration
-# ==============================================================================
-OCR_API_KEY = "K87302967488957"
-OCR_API_URL = "https://api.ocr.space/parse/image"
-
-def ocr_space_file(file_storage):
-    """
-    OCRs a single file using the OCR.space API.
-    :param file_storage: A FileStorage object.
-    :return: The parsed text from the image.
-    """
-    payload = {'apikey': OCR_API_KEY}
-    with file_storage.stream as f:
-        r = requests.post(OCR_API_URL,
-                          files={file_storage.filename: f},
-                          data=payload,
-                          )
-    result = r.json()
-    if result['IsErroredOnProcessing']:
-        return f"Error processing {file_storage.filename}: {result['ErrorMessage']}"
-    return result['ParsedResults'][0]['ParsedText']
-
-# ==============================================================================
 # Flask Routes
 # ==============================================================================
 
@@ -192,19 +198,6 @@ def index():
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
-
-@app.route("/ocr_upload", methods=["POST"])
-def ocr_upload():
-    if 'files' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-    files = request.files.getlist('files')
-    if not files:
-        return jsonify({"error": "No selected file"}), 400
-
-    with ThreadPoolExecutor() as executor:
-        results = list(executor.map(ocr_space_file, files))
-
-    return jsonify({"text": "\n".join(results)})
 
 @app.route("/upload_file", methods=["POST"])
 def upload_file():
@@ -264,17 +257,35 @@ def execute_code():
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
-        data = request.json
+        image_data = None
+        media_type = None
+        if request.content_type.startswith('multipart/form-data'):
+            data = request.form.to_dict()
+            if 'file' in request.files:
+                file = request.files.get('file')
+                if file and file.filename:
+                    image_bytes = file.read()
+                    image_data = base64.b64encode(image_bytes).decode('utf-8')
+                    media_type = file.mimetype
+
+            if 'fileInfo' in data and data['fileInfo'] and data['fileInfo'] != 'null':
+                data['fileInfo'] = json.loads(data['fileInfo'])
+            else:
+                data['fileInfo'] = None
+        else:
+            data = request.json
+
         sid = data["session"]
         model = data.get("model", "claude-sonnet-3.7")
         action = data.get("action", "chat")
-        is_reasoning_enabled = data.get("isReasoningEnabled", True)
+        raw_reasoning = data.get("isReasoningEnabled", True)
+        is_reasoning_enabled = str(raw_reasoning).lower() == 'true'
 
         if action == "chat":
             text = data["text"]
             file_info = data.get("fileInfo")
-            user_message_to_save = f"[File: {file_info['name']}]\n{text}" if file_info else text
-            save_msg(sid, "user", user_message_to_save)
+            user_message_to_save = f"[File: {file_info['name']}]\n{text}" if file_info and not image_data else text
+            save_msg(sid, "user", user_message_to_save, image_data=image_data, media_type=media_type)
             chat_history = load_msgs(sid)
         elif action == "continue":
             chat_history = load_msgs(sid)

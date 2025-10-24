@@ -63,8 +63,10 @@ def update_last_bot_message(sid, new_content_chunk, is_code_block_open=False):
         if last_bot_msg:
             existing_message = last_bot_msg['message']
             if is_code_block_open:
+                # If code block is open, append directly without extra fences
                 updated_message = existing_message + new_content_chunk
             else:
+                # Normal append for non-code or closed code blocks
                 updated_message = existing_message + new_content_chunk
             db.execute("UPDATE chats SET message=? WHERE id=?", (updated_message, last_bot_msg['id']))
         else:
@@ -88,7 +90,6 @@ def load_msgs(sid):
 # API Integration Section
 # ==============================================================================
 
-# Claude API Setup
 claude_session = requests.Session()
 claude_headers = {
     'authority': 'ai-sdk-reasoning.vercel.app',
@@ -122,7 +123,7 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=Fal
         'trigger': 'submit-user-message',
     }
     try:
-        with claude_session.post(claude_url, headers=claude_headers, json=payload, stream=True) as r:
+        with claude_session.post(claude_url, headers=claude_headers, json=payload, stream=True, timeout=90) as r:
             r.raise_for_status()
             code_block_open = False
             code_fence_count = 0
@@ -139,61 +140,22 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=Fal
                         if data_json.get("type") == "text-delta":
                             delta = data_json.get("delta", "")
                             if delta:
+                                # Track code block state
                                 code_fence_count += delta.count('```')
                                 code_block_open = code_fence_count % 2 == 1
                                 if is_continuation and last_partial_line and buffer == "":
+                                    # Trim overlapping content and avoid extra whitespace
                                     delta = delta.lstrip()
                                     if delta.startswith(last_partial_line):
                                         delta = delta[len(last_partial_line):]
                                     elif last_partial_line.endswith(delta[0]):
-                                        delta = delta[1:]
+                                        delta = delta[1:]  # Skip the first character if it matches the last one
                                 buffer += delta
                                 yield delta, code_block_open
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         continue
     except Exception as e:
-        yield f"Claude API Error: {str(e)}", False
-
-gpt5_session = requests.Session()
-gpt5_url = "https://api.openai.com/v1/chat/completions"
-
-def call_gpt5(chat_history, is_reasoning_enabled=False, is_continuation=False, api_key=None):
-    if not api_key:
-        return {"error": "No API key provided."}, False
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-
-    messages = [{"role": "system", "content": "You are a helpful and smart AI assistant."}]
-    messages.extend([{"role": msg["role"], "content": msg["content"]} for msg in chat_history])
-
-    payload = {
-        "model": "gpt-5",
-        "messages": messages,
-        "stream": False
-    }
-
-    try:
-        response = gpt5_session.post(gpt5_url, headers=headers, json=payload, timeout=None)
-        response.raise_for_status()
-
-        # Parse the full API response and extract content
-        api_data = response.json()
-        reply = api_data["choices"][0]["message"]["content"].strip()
-
-        if not reply:
-            return {"error": "Empty response received."}, False
-
-        return {"content": reply}, False
-
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Network Error: {str(e)}"}, False
-    except KeyError as e:
-        return {"error": f"Invalid API response structure: {str(e)}"}, False
-    except Exception as e:
-        return {"error": f"Unknown Error: {str(e)}"}, False
+        yield f"🚨 Claude API Error: {str(e)}", False
 
 # ==============================================================================
 # Flask Routes
@@ -270,7 +232,6 @@ def chat():
         model = data.get("model", "claude-sonnet-3.7")
         action = data.get("action", "chat")
         is_reasoning_enabled = data.get("isReasoningEnabled", True)
-        gpt5_api_key = data.get("gpt5ApiKey")
 
         if action == "chat":
             text = data["text"]
@@ -304,67 +265,44 @@ def chat():
                 }
                 chat_history.append(continue_prompt)
             else:
-                return jsonify({"error": "No previous bot message to continue."}), 400
+                return Response("No previous bot message to continue.", status=400)
             text = "continue"
             file_info = None
         else:
-            return jsonify({"error": "Invalid action."}), 400
+            return Response("Invalid action.", status=400)
 
         def gen():
+            buffer = ""
             code_block_open = False
             try:
                 if model == 'claude-sonnet-3.7':
                     last_line = chat_history[-1]['content'].split('\n')[-1].rstrip() if action == "continue" and chat_history else None
                     for chunk_text, is_code_block_open in stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=(action == "continue"), last_partial_line=last_line):
+                        buffer += chunk_text
                         code_block_open = is_code_block_open
                         yield chunk_text
-                elif model == 'gpt-5':
-                    result, is_code_block_open = call_gpt5(chat_history, is_reasoning_enabled, is_continuation=(action == "continue"), api_key=gpt5_api_key)
-                    code_block_open = is_code_block_open
-                    # Yield as JSON string
-                    yield json.dumps(result)
                 else:
-                    error_msg = {"error": f"The selected model '{model}' is not supported."}
-                    yield json.dumps(error_msg)
+                    error_msg = f"🚫 The selected model '{model}' is not supported."
+                    yield error_msg
+                    buffer = error_msg
             except requests.exceptions.RequestException as e:
-                error_msg = {"error": f"Connection Error: I couldn't reach the AI service for model '{model}'. Details: {str(e)}"}
-                yield json.dumps(error_msg)
+                error_msg = f"🤖 **Connection Error**\n\nI couldn't reach the AI service for model '{model}'. Details: {e}"
+                yield error_msg
+                buffer = error_msg
             except Exception as e:
-                error_msg = {"error": f"System Error: Unexpected error: {str(e)}"}
-                yield json.dumps(error_msg)
-            finally:
-                if action == "continue":
-                    # Note: For GPT-5, buffer would need to be captured from result['content'] if successful
-                    pass
-                else:
-                    # Save the full response to DB (for GPT-5, use result['content'] if available)
-                    pass  # Handled in route after gen()
+                error_msg = f"🤖 **System Error**\n\nUnexpected error: {str(e)}"
+                yield error_msg
+                buffer = error_msg
+            if buffer:
+                with app.app_context():
+                    if action == "continue":
+                        update_last_bot_message(sid, buffer, code_block_open)
+                    else:
+                        save_msg(sid, "bot", buffer)
 
-        if model == 'claude-sonnet-3.7':
-            # Streaming for Claude
-            def stream_gen():
-                for chunk in gen():
-                    yield chunk
-                # Save full buffer to DB after streaming (simplified; in practice, accumulate in gen or post-process)
-                # For now, assume accumulation happens client-side or adjust as needed
-                save_msg(sid, "bot", "Full response accumulated client-side")  # Placeholder
-            return Response(stream_with_context(stream_gen()), mimetype="text/plain; charset=utf-8")
-        else:
-            # Non-streaming for GPT-5
-            try:
-                result_str = next(gen())
-                result_data = json.loads(result_str)
-                # Save to DB if successful
-                if "content" in result_data:
-                    save_msg(sid, "bot", result_data["content"])
-                elif action == "continue":
-                    update_last_bot_message(sid, result_data.get("content", ""), code_block_open)
-                return jsonify(result_data)
-            except (StopIteration, json.JSONDecodeError) as e:
-                return jsonify({"error": f"Failed to process response: {str(e)}"}), 500
-
+        return Response(stream_with_context(gen()), mimetype="text/plain; charset=utf-8")
     except Exception as e:
-        return jsonify({"error": f"Server error: {str(e)}"}), 500
+        return Response(f"Server error: {str(e)}", status=500)
 
 if __name__ == "__main__":
     init_db()

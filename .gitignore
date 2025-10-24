@@ -1,0 +1,5 @@
+# Log files
+app.log
+
+# Database files
+chat_history.db

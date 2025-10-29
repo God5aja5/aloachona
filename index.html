@@ -127,6 +127,20 @@ document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
         autoResizeTextarea();
         inputTextArea.focus();
+        resumeStreamingIfNeeded();
+    }
+
+    function resumeStreamingIfNeeded() {
+        const lastTaskId = localStorage.getItem('lastTaskId');
+        if (lastTaskId) {
+            const currentChat = appState.chats[appState.currentChatId];
+            if (currentChat && currentChat.messages.length > 0) {
+                const lastMessage = currentChat.messages[currentChat.messages.length - 1];
+                if (lastMessage.role === 'bot' && lastMessage.content === 'typing') {
+                     handleStreaming(lastTaskId, lastMessage, false);
+                }
+            }
+        }
     }
 
     function loadStateFromLocalStorage() {
@@ -527,32 +541,10 @@ document.addEventListener('DOMContentLoaded', () => {
             };
             const res = await fetch("/chat", { method: "POST", signal: abortController.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload) });
             if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let existingContent = botMessageBubble.dataset.rawContent || '';
-            let newContent = "";
-            let newVisibleContent = "";
-            botMessageBubble.innerHTML = marked.parse(existingContent.replace(thinkingTagRegex, '') + "\n", { gfm: true, breaks: true });
-            renderMarkdown(botMessageBubble);
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value, { stream: true });
-                newContent += chunk;
-                const chunkVisibleText = chunk.replace(thinkingTagRegex, '');
-                newVisibleContent += chunkVisibleText;
-                botMessageBubble.innerHTML = marked.parse(existingContent.replace(thinkingTagRegex, '') + "\n" + newVisibleContent + " ▋", { gfm: true, breaks: true });
-                renderMarkdown(botMessageBubble);
-                scrollToBottom();
-            }
-            const finalFullContent = existingContent + newContent;
-            const lastMessage = currentChat.messages[currentChat.messages.length - 1];
-            if (lastMessage && lastMessage.role === 'bot') lastMessage.content = finalFullContent;
-            const finalBubbleParent = botMessageBubble.closest('.message-wrapper');
-            if (finalBubbleParent) {
-                finalBubbleParent.remove();
-                addMessageToUI({ role: 'bot', content: finalFullContent });
-            }
+
+            const { task_id } = await res.json();
+            await pollForTaskCompletion(task_id, botMessageBubble, true);
+
         } catch (error) {
             let errorMessage = error.name === 'AbortError' ? "Request stopped by user." : `**Error:** ${error.message}`;
             setStatus('Error', 'error');
@@ -595,7 +587,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const userMessage = { role: 'user', content: messageText, image_data: imageData };
         currentChat.messages.push(userMessage);
-        renderChatMessages();
 
         if (currentChat.messages.length === 1 && currentChat.title === 'New Chat') {
             currentChat.title = messageText.substring(0, 40) || 'Image Message';
@@ -606,85 +597,64 @@ document.addEventListener('DOMContentLoaded', () => {
         updateChatControls(currentChat);
         inputTextArea.value = '';
         autoResizeTextarea();
-        const botMessageBubble = addMessageToUI({ role: 'bot', content: 'typing' });
-        abortController = new AbortController();
+        const botMessage = { role: 'bot', content: 'typing' };
+        currentChat.messages.push(botMessage);
+        renderChatMessages();
 
         try {
-            let res;
-            if (appState.attachedFile) {
-                const formData = new FormData();
-                formData.append('session', currentChat.id);
-                formData.append('text', messageText);
-                formData.append('model', currentChat.model);
-                formData.append('action', 'chat');
-                formData.append('temperature', currentChat.temperature);
-                formData.append('isReasoningEnabled', currentChat.isReasoningEnabled);
-                formData.append('file', appState.attachedFile);
-
-                res = await fetch("/chat", {
-                    method: "POST",
-                    signal: abortController.signal,
-                    body: formData
-                });
-            } else {
-                const payload = {
+            const res = await fetch("/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
                     session: currentChat.id,
                     text: messageText,
                     model: currentChat.model,
                     action: 'chat',
                     temperature: currentChat.temperature,
                     isReasoningEnabled: currentChat.isReasoningEnabled
-                };
-                 res = await fetch("/chat", {
-                    method: "POST",
-                    signal: abortController.signal,
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
-                });
-            }
-
-            clearFilePreview();
+                })
+            });
 
             if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
+            const { task_id } = await res.json();
+            localStorage.setItem('lastTaskId', task_id);
+            await handleStreaming(task_id, botMessage, false);
 
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let botResponse = "";
-            let visibleResponse = "";
-            const thinkingTagRegex = /<think>([\s\S]*?)<\/think>/gi;
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value, { stream: true });
-                botResponse += chunk;
-                const chunkVisibleText = chunk.replace(thinkingTagRegex, '');
-                visibleResponse += chunkVisibleText;
-                botMessageBubble.innerHTML = marked.parse(visibleResponse + " ▋", { gfm: true, breaks: true });
-                renderMarkdown(botMessageBubble);
-                scrollToBottom();
-            }
-            const finalBotMessage = { role: 'bot', content: botResponse };
-            currentChat.messages.push(finalBotMessage);
-            const finalBubbleParent = botMessageBubble.closest('.message-wrapper');
-            if (finalBubbleParent) {
-                finalBubbleParent.remove();
-                addMessageToUI(finalBotMessage);
-            }
         } catch (error) {
-            let errorMessage = error.name === 'AbortError' ? "Request stopped by user." : `**Error:** ${error.message}. Please check your connection or the server.`;
+            botMessage.content = `**Error:** ${error.message}. Please check your connection or the server.`;
             setStatus('Error', 'error');
-            const errorMsgObj = { role: 'bot', content: errorMessage };
-            const errorBubbleParent = botMessageBubble.closest('.message-wrapper');
-            if (errorBubbleParent) {
-                errorBubbleParent.remove();
-                addMessageToUI(errorMsgObj);
-            }
-            currentChat.messages.push(errorMsgObj);
         } finally {
             setLoadingState(false);
             saveStateToLocalStorage();
             inputTextArea.focus();
+            localStorage.removeItem('lastTaskId');
         }
+    }
+
+    function handleStreaming(taskId, botMessage, isContinuation) {
+        const eventSource = new EventSource(`/chat/stream/${taskId}`);
+        let botResponse = "";
+
+        eventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.error) {
+                botMessage.content = `**Error:** ${data.error}`;
+                eventSource.close();
+                return;
+            }
+
+            botResponse += data.chunk;
+            botMessage.content = botResponse;
+
+            renderChatMessages();
+            scrollToBottom();
+        };
+
+        eventSource.onerror = function(err) {
+            botMessage.content += "\n\n**Error:** Lost connection to server.";
+            setStatus('Error', 'error');
+            eventSource.close();
+        };
     }
 
     function setLoadingState(isLoading) {

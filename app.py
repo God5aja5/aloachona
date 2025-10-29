@@ -10,6 +10,7 @@ from flask import Flask, Response, stream_with_context, request, jsonify, g, sen
 import requests
 from PIL import Image
 import io
+from queue import Queue
 
 # ==============================================================================
 # Database Setup
@@ -65,10 +66,8 @@ def update_last_bot_message(sid, new_content_chunk, is_code_block_open=False):
         if last_bot_msg:
             existing_message = last_bot_msg['message']
             if is_code_block_open:
-                # If code block is open, append directly without extra fences
                 updated_message = existing_message + new_content_chunk
             else:
-                # Normal append for non-code or closed code blocks
                 updated_message = existing_message + new_content_chunk
             db.execute("UPDATE chats SET message=? WHERE id=?", (updated_message, last_bot_msg['id']))
         else:
@@ -188,6 +187,59 @@ def stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=Fal
         yield f"🚨 Claude API Error: {str(e)}", False
 
 # ==============================================================================
+# Background Task Management
+# ==============================================================================
+tasks = {}
+tasks_lock = threading.Lock()
+
+def generation_worker(task_id, sid, chat_history, is_reasoning_enabled, model, action):
+    with tasks_lock:
+        tasks[task_id] = {"status": "running", "result": "", "queue": Queue()}
+
+    buffer = ""
+    try:
+        generator = stream_claude_sonnet(
+            chat_history,
+            is_reasoning_enabled,
+            is_continuation=(action == "continue"),
+            last_partial_line=chat_history[-1]['content'].split('\n')[-1].rstrip() if action == "continue" and chat_history and chat_history[-1]['role'] == 'assistant' else None
+        )
+
+        code_block_open = False
+        for chunk, is_code_block_open in generator:
+            buffer += chunk
+            code_block_open = is_code_block_open
+            with tasks_lock:
+                tasks[task_id]["queue"].put(chunk)
+
+        with app.app_context():
+            if action == "continue":
+                update_last_bot_message(sid, buffer, code_block_open)
+            else:
+                save_msg(sid, "bot", buffer)
+
+        with tasks_lock:
+            tasks[task_id]["status"] = "completed"
+            tasks[task_id]["queue"].put(None) # Signal completion
+
+    except Exception as e:
+        with tasks_lock:
+            tasks[task_id]["status"] = "error"
+            tasks[task_id]["error"] = str(e)
+            tasks[task_id]["queue"].put(None)
+
+def cleanup_tasks():
+    while True:
+        time.sleep(600) # Run every 10 minutes
+        with tasks_lock:
+            stale_tasks = []
+            for task_id, task in tasks.items():
+                if task['status'] in ['completed', 'error']:
+                    stale_tasks.append(task_id)
+            for task_id in stale_tasks:
+                del tasks[task_id]
+
+# ==============================================================================
 # Flask Routes
 # ==============================================================================
 
@@ -198,61 +250,6 @@ def index():
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
-
-@app.route("/upload_file", methods=["POST"])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
-    try:
-        filename = file.filename.lower()
-        if filename.endswith(('.png', '.jpg', '.jpeg')):
-            image_bytes = file.read()
-            image = Image.open(io.BytesIO(image_bytes))
-            width, height = image.size
-            file.seek(0)
-            encoded_string = base64.b64encode(image_bytes).decode('utf-8')
-            mime_type = file.mimetype
-            base64_uri = f"data:{mime_type};base64,{encoded_string}"
-            return jsonify({
-                "id": str(uuid.uuid4()),
-                "name": file.filename,
-                "size": len(image_bytes),
-                "width": width,
-                "height": height,
-                "fileType": mime_type,
-                "base64": base64_uri,
-                "type": "image"
-            })
-        elif filename.endswith(('.py', '.js', '.txt')):
-            content = file.read().decode('utf-8')
-            return jsonify({
-                "id": str(uuid.uuid4()),
-                "name": file.filename,
-                "size": len(content),
-                "content": content,
-                "type": "code"
-            })
-        else:
-            return jsonify({"error": "Unsupported file type. Use images (.png, .jpg, .jpeg) or code files (.py, .js, .txt)"}), 400
-    except Exception as e:
-        return jsonify({"error": f"Failed to process file: {str(e)}"}), 500
-
-@app.route("/execute_code", methods=["POST"])
-def execute_code():
-    try:
-        data = request.json
-        code = data.get("code")
-        language = data.get("language", "python")
-        if not code:
-            return jsonify({"error": "No code provided"}), 400
-        if language != "python":
-            return jsonify({"error": "Only Python execution is supported currently"}), 400
-        return jsonify({"output": "Code execution is not fully implemented server-side. Use client-side Pyodide for now."})
-    except Exception as e:
-        return jsonify({"error": f"Execution error: {str(e)}"}), 500
 
 @app.route("/chat", methods=["POST"])
 def chat():
@@ -267,11 +264,6 @@ def chat():
                     image_bytes = file.read()
                     image_data = base64.b64encode(image_bytes).decode('utf-8')
                     media_type = file.mimetype
-
-            if 'fileInfo' in data and data['fileInfo'] and data['fileInfo'] != 'null':
-                data['fileInfo'] = json.loads(data['fileInfo'])
-            else:
-                data['fileInfo'] = None
         else:
             data = request.json
 
@@ -283,76 +275,49 @@ def chat():
 
         if action == "chat":
             text = data["text"]
-            file_info = data.get("fileInfo")
-            user_message_to_save = f"[File: {file_info['name']}]\n{text}" if file_info and not image_data else text
-            save_msg(sid, "user", user_message_to_save, image_data=image_data, media_type=media_type)
+            save_msg(sid, "user", text, image_data=image_data, media_type=media_type)
             chat_history = load_msgs(sid)
         elif action == "continue":
             chat_history = load_msgs(sid)
-            if chat_history and chat_history[-1]['role'] == 'assistant':
-                last_content = chat_history[-1]['content']
-                last_lines = '\n'.join(last_content.split('\n')[-3:])
-                last_line = last_content.split('\n')[-1].rstrip()
-                open_code_block = last_content.count('```') % 2 == 1
-                if open_code_block:
-                    continue_content = (
-                        f"Please continue the code precisely from the last character of the incomplete line: '{last_line}'.\n"
-                        f"Start your response with the exact characters needed to complete the line, without repeating any part of '{last_line}', "
-                        f"and without adding any extra spaces, newlines, ``` fences, or introductory phrases. For example, if the last line was 'parent_i', "
-                        f"start with 'd' to complete 'parent_id' seamlessly."
-                    )
-                else:
-                    continue_content = (
-                        f"Please continue the response precisely from where you left off. "
-                        f"The last part was:\n{last_lines}\n"
-                        f"Start with the next sentence or content without repetition, extra spaces, newlines, or introductory phrases."
-                    )
-                continue_prompt = {
-                    'role': 'user',
-                    'content': continue_content
-                }
-                chat_history.append(continue_prompt)
-            else:
-                return Response("No previous bot message to continue.", status=400)
-            text = "continue"
-            file_info = None
-        else:
-            return Response("Invalid action.", status=400)
+            if not (chat_history and chat_history[-1]['role'] == 'assistant'):
+                 return Response("No previous bot message to continue.", status=400)
 
-        def gen():
-            buffer = ""
-            code_block_open = False
-            try:
-                if model == 'claude-sonnet-3.7':
-                    last_line = chat_history[-1]['content'].split('\n')[-1].rstrip() if action == "continue" and chat_history else None
-                    for chunk_text, is_code_block_open in stream_claude_sonnet(chat_history, is_reasoning_enabled, is_continuation=(action == "continue"), last_partial_line=last_line):
-                        buffer += chunk_text
-                        code_block_open = is_code_block_open
-                        yield chunk_text
-                else:
-                    error_msg = f"🚫 The selected model '{model}' is not supported."
-                    yield error_msg
-                    buffer = error_msg
-            except requests.exceptions.RequestException as e:
-                error_msg = f"🤖 **Connection Error**\n\nI couldn't reach the AI service for model '{model}'. Details: {e}"
-                yield error_msg
-                buffer = error_msg
-            except Exception as e:
-                error_msg = f"🤖 **System Error**\n\nUnexpected error: {str(e)}"
-                yield error_msg
-                buffer = error_msg
-            if buffer:
-                with app.app_context():
-                    if action == "continue":
-                        update_last_bot_message(sid, buffer, code_block_open)
-                    else:
-                        save_msg(sid, "bot", buffer)
+        task_id = str(uuid.uuid4())
+        thread = threading.Thread(
+            target=generation_worker,
+            args=(task_id, sid, chat_history, is_reasoning_enabled, model, action)
+        )
+        thread.daemon = True
+        thread.start()
 
-        return Response(stream_with_context(gen()), mimetype="text/plain; charset=utf-8")
+        return jsonify({"task_id": task_id})
     except Exception as e:
-        return Response(f"Server error: {str(e)}", status=500)
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/chat/stream/<task_id>")
+def stream(task_id):
+    app.logger.info(f"Streaming request received for task_id: {task_id}")
+    def generate():
+        with tasks_lock:
+            task = tasks.get(task_id)
+            if not task:
+                app.logger.error(f"Task not found for task_id: {task_id}")
+                yield f"data: {{'error': 'Task not found'}}\n\n"
+                return
+
+        q = task["queue"]
+        while True:
+            chunk = q.get()
+            if chunk is None:
+                break
+            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
 
 if __name__ == "__main__":
     init_db()
+    cleanup_thread = threading.Thread(target=cleanup_tasks, daemon=True)
+    cleanup_thread.start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

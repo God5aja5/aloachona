@@ -344,8 +344,19 @@ input:checked+.slider:before {
     cursor: pointer;
 }
 
+#chat-title-container {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
 #chat-title {
     font-weight: 500;
+}
+
+#edit-chat-title-btn {
+    font-size: 1rem;
+    padding: 0.2rem;
 }
 
 .status {
@@ -828,6 +839,77 @@ input:checked+.slider:before {
     gap: 0.5rem;
 }
 
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.modal-footer button {
+    padding: 0.6rem 1.2rem;
+    border: none;
+    border-radius: 999px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.modal-footer button#save-rename-btn {
+    background-color: var(--accent-primary);
+    color: var(--text-white);
+}
+
+.modal-footer button#save-rename-btn:hover {
+    background-color: var(--accent-primary-hover);
+}
+
+.modal-footer button#cancel-rename-btn {
+    background-color: var(--accent-secondary);
+    color: var(--text-secondary);
+}
+
+.modal-footer button#cancel-rename-btn:hover {
+    background-color: var(--accent-secondary-hover);
+    color: var(--text-white);
+}
+
+#rename-chat-input {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background-color: var(--bg-dark-primary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: var(--border-radius-main);
+    font-size: 1rem;
+}
+
+#rename-chat-input:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 2px rgba(90, 135, 255, 0.3);
+}
+
+.modal-footer button.danger {
+    background-color: var(--accent-danger);
+    color: var(--text-white);
+}
+
+.modal-footer button.danger:hover {
+    background-color: var(--accent-danger-hover);
+}
+
+#delete-chat-modal .modal-body {
+    background-color: transparent;
+    font-family: var(--font-main);
+    font-size: 1rem;
+    white-space: normal;
+}
+
+
 @media (max-width: 768px) {
     .app-layout {
         grid-template-columns: 1fr;
@@ -877,4 +959,31 @@ input:checked+.slider:before {
     background: linear-gradient(135deg, rgba(90, 135, 255, 0.1) 0%, rgba(90, 135, 255, 0) 70%);
     z-index: 0;
     pointer-events: none;
+}
+
+#toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 3000;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.5rem;
+}
+
+.toast {
+    background-color: var(--bg-dark-tertiary);
+    color: var(--text-white);
+    padding: 0.75rem 1.25rem;
+    border-radius: 999px;
+    box-shadow: 0 4px 12px var(--shadow-color);
+    opacity: 0;
+    transform: translateX(100%);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.toast.show {
+    opacity: 1;
+    transform: translateX(0);
 }
